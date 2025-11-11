@@ -1,0 +1,65 @@
+name: Env Guard
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  check-env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required GitHub secrets
+        env:
+          REPO: ${{ github.repository }}
+          GITHUB_API: https://api.github.com
+        run: |
+          set -euo pipefail
+          required_secrets=(SLACK_WEBHOOK_URL AIRTABLE_TOKEN WIX_MCP_KEY CHECKOUT_URL)
+          missing=()
+          for s in "${required_secrets[@]}"; do
+            http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "$GITHUB_API/repos/$REPO/actions/secrets/$s")
+            if [ "$http_status" -eq 404 ]; then
+              missing+=("$s")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required GitHub secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "✅ All required GitHub secrets present."
+
+      - name: (Optional) Check Vercel project envs if VERCEL_TOKEN set
+        if: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_PROJECT_ID != '' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          echo "Checking Vercel envs for project $VERCEL_PROJECT_ID"
+          envs_json=$(curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID/env")
+          if command -v jq >/dev/null 2>&1; then
+            keys=$(echo "$envs_json" | jq -r '.envs[].key' || true)
+          else
+            keys=$(echo "$envs_json" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p' || true)
+          fi
+          required_vercel=(NEXT_PUBLIC_GA_ID NEXT_PUBLIC_STRIPE_CHECKOUT_URL NEXT_PUBLIC_API_URL NEXT_PUBLIC_VERSION)
+          missing_vercel=()
+          for k in "${required_vercel[@]}"; do
+            if ! echo "$keys" | grep -qx "$k"; then
+              missing_vercel+=("$k")
+            fi
+          done
+          if [ "${#missing_vercel[@]}" -gt 0 ]; then
+            echo "::error::Missing Vercel env vars: ${missing_vercel[*]}"
+            exit 1
+          fi
+          echo "✅ Required Vercel env vars present."
